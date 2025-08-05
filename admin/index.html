@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quản trị Sản phẩm</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Quản trị Sản phẩm</h1>
+        <button onclick="showAddForm()"><i class="fas fa-plus"></i> Thêm sản phẩm</button>
+        <a href="/" class="back-btn"><i class="fas fa-home"></i> Về trang chủ</a>
+
+        <!-- Form thêm/sửa sản phẩm -->
+        <div id="productForm" class="form-container" style="display: none;">
+            <h2 id="formTitle">Thêm sản phẩm</h2>
+            <form onsubmit="event.preventDefault();">
+                <input type="hidden" id="productId">
+                <div class="form-group">
+                    <label for="productName">Tên sản phẩm:</label>
+                    <input type="text" id="productName" required>
+                </div>
+                <div class="form-group">
+                    <label for="productBrand">Thương hiệu:</label>
+                    <input type="text" id="productBrand" required>
+                </div>
+                <div class="form-group">
+                    <label for="productDescription">Mô tả:</label>
+                    <textarea id="productDescription"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="productPrice">Giá (VNĐ):</label>
+                    <input type="number" id="productPrice" required>
+                </div>
+                <div class="form-group">
+                    <label for="productColors">Màu sắc:</label>
+                    <input type="text" id="productColors" placeholder="VD: Black, White">
+                </div>
+                <div class="form-group">
+                    <label for="productStorage">Lưu trữ:</label>
+                    <input type="text" id="productStorage" placeholder="VD: 128GB">
+                </div>
+                <div class="form-group">
+                    <label for="productReleaseDate">Ngày ra mắt:</label>
+                    <input type="date" id="productReleaseDate">
+                </div>
+                <div class="form-group">
+                    <label for="productWarranty">Bảo hành (tháng):</label>
+                    <input type="number" id="productWarranty">
+                </div>
+                <div class="form-group">
+                    <label for="productImage">Hình ảnh:</label>
+                    <input type="file" id="productImage" accept="image/jpeg,image/jpg,image/png">
+                    <div id="currentImage" style="display: none; margin-top: 10px;"></div>
+                </div>
+                <div class="form-buttons">
+                    <button id="formSubmit">Lưu</button>
+                    <button type="button" onclick="hideForm()">Hủy</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Bảng danh sách sản phẩm -->
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Tên</th>
+                    <th>Thương hiệu</th>
+                    <th>Giá</th>
+                    <th>Hình ảnh</th>
+                    <th>Hành động</th>
+                </tr>
+            </thead>
+            <tbody id="productList">
+                <!-- Sản phẩm sẽ được thêm vào đây -->
+            </tbody>
+        </table>
+    </div>
+    <script src="/admin/admin.js"></script>
+</body>
+</html>

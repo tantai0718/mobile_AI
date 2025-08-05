@@ -1,0 +1,1096 @@
+require('dotenv').config();
+
+const express = require('express');
+const bodyParser = require('body-parser');
+const axios = require('axios');
+const mysql = require('mysql2');
+const path = require('path');
+const multer = require('multer');
+const fs = require('fs');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Load API Keys từ .env
+const WIT_AI_ACCESS_TOKEN = process.env.WIT_AI_ACCESS_TOKEN;
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
+
+// Kiểm tra API Key
+if (!DEEPSEEK_API_KEY) {
+    console.error('❌ LỖI: Chưa có DEEPSEEK_API_KEY trong .env!');
+    process.exit(1);
+}
+if (!WIT_AI_ACCESS_TOKEN) {
+    console.error('❌ LỖI: Chưa có WIT_AI_ACCESS_TOKEN trong .env!');
+    process.exit(1);
+}
+
+// Kết nối MySQL
+const db = mysql.createConnection({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME
+});
+
+db.connect(err => {
+    if (err) {
+        console.error('❌ Lỗi kết nối MySQL:', err);
+        process.exit(1);
+    }
+    console.log('✅ Kết nối MySQL thành công!');
+});
+
+// Cấu hình multer để upload file
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const uploadPath = path.join(__dirname, 'public', 'images');
+        if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+        }
+        cb(null, uploadPath);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const ext = path.extname(file.originalname);
+        cb(null, file.fieldname + '-' + uniqueSuffix + ext);
+    }
+});
+
+const upload = multer({
+    storage: storage,
+    fileFilter: (req, file, cb) => {
+        const filetypes = /jpeg|jpg|png/;
+        const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = filetypes.test(file.mimetype);
+        if (extname && mimetype) {
+            return cb(null, true);
+        } else {
+            cb(new Error('Chỉ chấp nhận file ảnh (jpeg, jpg, png)!'));
+        }
+    },
+    limits: { fileSize: 5 * 1024 * 1024 } // Giới hạn kích thước file: 5MB
+});
+
+// Middleware
+app.use(bodyParser.json());
+app.use(express.static('public'));
+app.use('/admin', express.static('admin'));
+app.use('/images', express.static('public/images'));
+
+// Route cho trang chính (chatbot)
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Route cho trang quản trị
+app.get('/admin', (req, res) => {
+    res.sendFile(path.join(__dirname, 'admin', 'index.html'));
+});
+
+// Hàm định dạng giá theo chuẩn Việt Nam
+function formatPrice(price) {
+    return price.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + ' VNĐ';
+}
+
+// Hàm truy vấn SQL với Promise
+const query = (sql, params) => {
+    return new Promise((resolve, reject) => {
+        console.log('📋 Truy vấn SQL:', sql);
+        console.log('📋 Tham số:', params);
+        db.query(sql, params, (err, results) => {
+            if (err) {
+                console.error('❌ Lỗi truy vấn MySQL:', err);
+                reject(err);
+            } else {
+                resolve(results);
+            }
+        });
+    });
+};
+
+// API lấy danh sách sản phẩm từ MySQL (thêm phân trang, tìm kiếm, lọc)
+app.get('/products', async (req, res) => {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+    const search = req.query.search || '';
+    const minPrice = parseFloat(req.query.minPrice) || 0;
+    let maxPrice = parseFloat(req.query.maxPrice) || Infinity;
+    const brand = req.query.brand || '';
+
+    if (maxPrice === Infinity || isNaN(maxPrice)) {
+        maxPrice = 999999999;
+    }
+    if (isNaN(minPrice)) {
+        minPrice = 0;
+    }
+
+    let whereConditions = [
+        `(LOWER(p.name) LIKE LOWER(?) OR LOWER(p.brand) LIKE LOWER(?))`,
+        `p.price BETWEEN ? AND ?`
+    ];
+    let params = [`%${search}%`, `%${search}%`, minPrice, maxPrice];
+
+    if (brand) {
+        whereConditions.push(`p.brand = ?`);
+        params.push(brand);
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    try {
+        const products = await query(
+            `SELECT p.*, 
+                    (SELECT GROUP_CONCAT(promotion_name SEPARATOR '; ') 
+                     FROM promotions 
+                     WHERE product_id = p.product_id OR product_id IS NULL) AS promotion_names,
+                    (SELECT GROUP_CONCAT(feature_name SEPARATOR '; ') 
+                     FROM features 
+                     WHERE product_id = p.product_id) AS features
+             FROM products p 
+             WHERE ${whereClause}
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset]
+        );
+
+        // Định dạng giá cho từng sản phẩm
+        const formattedProducts = products.map(product => ({
+            ...product,
+            formattedPrice: formatPrice(product.price)
+        }));
+
+        const totalResult = await query(
+            `SELECT COUNT(*) as total 
+             FROM products p 
+             WHERE ${whereClause}`,
+            [...params]
+        );
+
+        const total = totalResult && totalResult.length > 0 ? totalResult[0].total : 0;
+
+        res.json({ products: formattedProducts, total, page, limit });
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi truy vấn dữ liệu.', details: err.message });
+    }
+});
+
+// API thêm sản phẩm (có upload hình ảnh)
+app.post('/admin/products', upload.single('image'), async (req, res) => {
+    const { name, brand, description, price, colors, storage, release_date, warranty_period } = req.body;
+    const image_url = req.file ? req.file.filename : null;
+
+    if (!name || !brand || !price) {
+        return res.status(400).json({ error: 'Tên, thương hiệu và giá là bắt buộc.' });
+    }
+
+    try {
+        await query(
+            `INSERT INTO products (name, brand, description, price, colors, storage, release_date, warranty_period, image_url) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [name, brand, description, price, colors, storage, release_date, warranty_period, image_url]
+        );
+        res.json({ message: 'Thêm sản phẩm thành công!' });
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi khi thêm sản phẩm.', details: err.message });
+    }
+});
+
+// API sửa sản phẩm (có upload hình ảnh)
+app.put('/admin/products/:id', upload.single('image'), async (req, res) => {
+    const productId = req.params.id;
+    const { name, brand, description, price, colors, storage, release_date, warranty_period } = req.body;
+    const image_url = req.file ? req.file.filename : req.body.image_url;
+
+    if (!name || !brand || !price) {
+        return res.status(400).json({ error: 'Tên, thương hiệu và giá là bắt buộc.' });
+    }
+
+    try {
+        if (req.file) {
+            const oldProduct = await query(
+                `SELECT image_url FROM products WHERE product_id = ?`,
+                [productId]
+            );
+            if (oldProduct[0]?.image_url) {
+                const oldImagePath = path.join(__dirname, 'public', 'images', oldProduct[0].image_url);
+                if (fs.existsSync(oldImagePath)) {
+                    fs.unlinkSync(oldImagePath);
+                }
+            }
+        }
+
+        const result = await query(
+            `UPDATE products 
+             SET name = ?, brand = ?, description = ?, price = ?, colors = ?, storage = ?, release_date = ?, warranty_period = ?, image_url = ? 
+             WHERE product_id = ?`,
+            [name, brand, description, price, colors, storage, release_date, warranty_period, image_url, productId]
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Sản phẩm không tồn tại.' });
+        }
+
+        res.json({ message: 'Cập nhật sản phẩm thành công!' });
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi khi cập nhật sản phẩm.', details: err.message });
+    }
+});
+
+// API xóa sản phẩm
+app.delete('/admin/products/:id', async (req, res) => {
+    const productId = req.params.id;
+
+    try {
+        const product = await query(
+            `SELECT image_url FROM products WHERE product_id = ?`,
+            [productId]
+        );
+        if (product[0]?.image_url) {
+            const imagePath = path.join(__dirname, 'public', 'images', product[0].image_url);
+            if (fs.existsSync(imagePath)) {
+                fs.unlinkSync(imagePath);
+            }
+        }
+
+        const result = await query(
+            `DELETE FROM products WHERE product_id = ?`,
+            [productId]
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Sản phẩm không tồn tại.' });
+        }
+
+        res.json({ message: 'Xóa sản phẩm thành công!' });
+    } catch (err) {
+        res.status(500).json({ error: 'Lỗi khi xóa sản phẩm.', details: err.message });
+    }
+});
+
+// Hàm gọi API Wit.ai
+async function getWitResponse(message) {
+    try {
+        const response = await axios.get(
+            `https://api.wit.ai/message?v=20220201&q=${encodeURIComponent(message)}`,
+            {
+                headers: { Authorization: `Bearer ${WIT_AI_ACCESS_TOKEN}` }
+            }
+        );
+        return response.data;
+    } catch (error) {
+        console.error('❌ Lỗi từ Wit.ai:', error.response?.data || error.message);
+        return null;
+    }
+}
+
+// Hàm gọi DeepSeek AI
+async function getDeepSeekResponse(message, context = {}) {
+    try {
+        const response = await axios.post(
+            'https://api.deepseek.com/v1/chat/completions',
+            {
+                model: 'deepseek-chat',
+                messages: [
+                    {
+                        role: 'system',
+                        content: 'Bạn là chatbot của một cửa hàng điện thoại. Hãy trả lời tự nhiên và phù hợp.'
+                    },
+                    {
+                        role: 'user',
+                        content: `Người dùng hỏi: "${message}". Ngữ cảnh: ${JSON.stringify(context)}.`
+                    }
+                ],
+                max_tokens: 500,
+                temperature: 0.7
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return response.data.choices[0].message.content;
+    } catch (error) {
+        console.error('❌ Lỗi từ DeepSeek AI:', error.response?.data || error.message);
+        return 'Xin lỗi, tôi không thể trả lời ngay bây giờ. Bạn có thể hỏi lại hoặc cung cấp thêm thông tin không?';
+    }
+}
+
+// Hàm lấy thông tin sản phẩm từ MySQL
+async function getProductInfo(productName) {
+    try {
+        const results = await query(
+            `SELECT p.*, 
+                    (SELECT GROUP_CONCAT(promotion_name SEPARATOR '; ') 
+                     FROM promotions 
+                     WHERE product_id = p.product_id OR product_id IS NULL) AS promotion_names,
+                    (SELECT GROUP_CONCAT(feature_name SEPARATOR '; ') 
+                     FROM features 
+                     WHERE product_id = p.product_id) AS features
+             FROM products p 
+             WHERE LOWER(p.name) LIKE LOWER(?)`,
+            [`%${productName}%`]
+        );
+        return results[0] || null;
+    } catch (err) {
+        console.error('❌ Lỗi lấy thông tin sản phẩm:', err);
+        return null;
+    }
+}
+
+// Hàm tìm sản phẩm theo khoảng giá
+async function findProductsByPriceRange(minPrice, maxPrice, productName = null) {
+    try {
+        let sql = `
+            SELECT p.*,
+                   (SELECT GROUP_CONCAT(promotion_name SEPARATOR '; ')
+                     FROM promotions
+                     WHERE product_id = p.product_id OR product_id IS NULL) AS promotion_names,
+                   (SELECT GROUP_CONCAT(feature_name SEPARATOR '; ')
+                     FROM features
+                     WHERE product_id = p.product_id) AS features
+            FROM products p
+            WHERE p.price BETWEEN ? AND ?
+        `;
+        const params = [minPrice, maxPrice];
+
+        if (productName) {
+            sql += ` AND LOWER(p.name) LIKE LOWER(?)`;
+            params.push(`%${productName}%`);
+        }
+
+        console.log("SQL Query:", sql);
+        console.log("SQL Params:", params);
+
+        const products = await query(sql, params);
+        console.log("Products from DB:", products);
+
+        return products;
+    } catch (err) {
+        console.error('❌ Lỗi tìm sản phẩm theo giá:', err);
+        throw err;
+    }
+}
+
+// Hàm tìm sản phẩm theo thương hiệu
+async function findProductsByBrand(brand, feature = null, color = null) {
+    try {
+        let sql = `SELECT p.*, 
+                          (SELECT GROUP_CONCAT(promotion_name SEPARATOR '; ') 
+                           FROM promotions 
+                           WHERE product_id = p.product_id OR product_id IS NULL) AS promotion_names,
+                          (SELECT GROUP_CONCAT(feature_name SEPARATOR '; ') 
+                           FROM features 
+                           WHERE product_id = p.product_id) AS features
+                   FROM products p 
+                   WHERE p.brand = ?`;
+        let params = [brand];
+
+        if (feature) {
+            sql += ` AND EXISTS (
+                        SELECT 1 
+                        FROM features f 
+                        WHERE f.product_id = p.product_id 
+                        AND LOWER(f.feature_name) LIKE LOWER(?)
+                    )`;
+            params.push(`%${feature}%`);
+        }
+
+        if (color) {
+            sql += ` AND LOWER(p.colors) LIKE LOWER(?)`;
+            params.push(`%${color}%`);
+        }
+
+        return await query(sql, params);
+    } catch (err) {
+        console.error('❌ Lỗi tìm sản phẩm theo thương hiệu:', err);
+        return [];
+    }
+}
+
+// Hàm so sánh hai sản phẩm
+async function compareProducts(productName1, productName2) {
+    try {
+        const product1 = await getProductInfo(productName1);
+        const product2 = await getProductInfo(productName2);
+
+        if (!product1 || !product2) {
+            return null;
+        }
+
+        return { product1, product2 };
+    } catch (err) {
+        console.error('❌ Lỗi so sánh sản phẩm:', err);
+        return null;
+    }
+}
+
+// Hàm tìm thương hiệu trong câu hỏi nếu Wit.ai không nhận diện được
+function extractBrandFromMessage(message) {
+    const brands = ['vivo', 'oppo', 'samsung', 'apple', 'xiaomi'];
+    const messageLower = message.toLowerCase();
+    for (const brand of brands) {
+        if (messageLower.includes(brand)) {
+            return brand.charAt(0).toUpperCase() + brand.slice(1);
+        }
+    }
+    return null;
+}
+
+// Hàm gợi ý sản phẩm tương tự
+async function suggestSimilarProducts(brand, excludeProductName) {
+    try {
+        const products = await query(
+            `SELECT p.*,
+                    (SELECT GROUP_CONCAT(promotion_name SEPARATOR '; ') 
+                     FROM promotions 
+                     WHERE product_id = p.product_id OR product_id IS NULL) AS promotion_names,
+                    (SELECT GROUP_CONCAT(feature_name SEPARATOR '; ') 
+                     FROM features 
+                     WHERE product_id = p.product_id) AS features
+             FROM products p 
+             WHERE p.brand = ? AND LOWER(p.name) NOT LIKE LOWER(?)
+             LIMIT 3`,
+            [brand, `%${excludeProductName}%`]
+        );
+        return products;
+    } catch (err) {
+        console.error('❌ Lỗi gợi ý sản phẩm tương tự:', err);
+        return [];
+    }
+}
+
+// Đối tượng để lưu trữ ngữ cảnh cho mỗi phiên
+const conversationContext = {};
+
+// Middleware để tạo hoặc lấy ngữ cảnh cho mỗi phiên
+app.use((req, res, next) => {
+    const sessionId = req.headers['session-id'] || req.query.sessionId || req.body.sessionId;
+
+    if (!sessionId) {
+        return res.status(400).json({ error: 'Session ID is required' });
+    }
+
+    if (!conversationContext[sessionId]) {
+        conversationContext[sessionId] = {
+            lastProduct: null,
+            lastBrand: null,
+            lastIntent: null,
+            pendingOrder: null,
+            history: [],
+            consultation: { purpose: null, budget: null, feature: null, color: null }
+        };
+    }
+    req.context = conversationContext[sessionId];
+    req.sessionId = sessionId;
+    next();
+});
+
+// API xử lý chatbot
+app.post('/chatbot', async (req, res) => {
+    const userMessage = req.body.message.toLowerCase();
+    const sessionId = req.sessionId;
+    const context = req.context;
+
+    console.log(`📩 User: ${userMessage} (Session: ${sessionId})`);
+
+    // ✅ Bổ sung xử lý nếu bot đang chờ người dùng chọn mẫu sản phẩm
+    if (context.awaitingProductChoice) {
+        const targetProduct = await getProductInfo(userMessage);
+
+        if (targetProduct) {
+            const reply = `📌 **${targetProduct.name} (${targetProduct.brand})**:\n` +
+                          `${targetProduct.description || 'Chưa có mô tả'}\n` +
+                          `💰 **Giá**: ${formatPrice(targetProduct.price)}\n` +
+                          `🎨 **Màu sắc**: ${targetProduct.colors || 'Không có thông tin'}\n` +
+                          `📀 **Lưu trữ**: ${targetProduct.storage || 'Không có thông tin'}\n` +
+                          `🗓️ **Ra mắt**: ${targetProduct.release_date || 'Không có thông tin'}\n` +
+                          `🛡️ **Bảo hành**: ${targetProduct.warranty_period ? `${targetProduct.warranty_period} tháng` : 'Không có'}\n` +
+                          (targetProduct.promotion_names ? `🏰 **Khuyến mãi**: ${targetProduct.promotion_names}\n` : '') +
+                          (targetProduct.features ? `🌟 **Tính năng**: ${targetProduct.features}` : '') +
+                          `\nBạn có muốn đặt mua sản phẩm này không?`;
+
+            context.awaitingProductChoice = false;
+            context.lastProduct = targetProduct;
+            context.lastBrand = targetProduct.brand;
+
+            return res.json({ _text: reply, imageUrl: `/images/${targetProduct.image_url}`, showButtons: true });
+        } else {
+            return res.json({ _text: `⚠️ Không thể xác định sản phẩm. Vui lòng thử lại sau.` });
+        }
+    }
+
+    try {
+        const witResponse = await getWitResponse(userMessage);
+        if (!witResponse || !witResponse.intents) {
+            return res.json({ _text: '❌ Lỗi kết nối với Wit.ai. Hãy thử lại sau!' });
+        }
+
+        // Lấy intent và các entity từ Wit.ai
+        const intent = witResponse.intents?.[0]?.name || null;
+        let productName = witResponse.entities?.['product_name:product_name']?.[0]?.value || null;
+
+        // Nếu Wit.ai nhận sai product name (ví dụ nhập "iphone 11" mà trả về "iphone 13")
+        // thì fallback về chính userMessage luôn
+        if (!productName || !userMessage.includes(productName.toLowerCase())) {
+            productName = userMessage;
+        }
+
+        const priceRange = witResponse.entities?.['price_range:price_range']?.[0]?.value || null;
+        const feature = witResponse.entities?.['feature:feature']?.[0]?.value || null;
+        const color = witResponse.entities?.['color:color']?.[0]?.value || null;
+        let brand = witResponse.entities?.['brand:brand']?.[0]?.value || null;
+
+        // Nếu Wit.ai không nhận diện được brand, thử tìm thủ công trong câu hỏi
+        if (!brand && (intent === 'tim_kiem_theo_thuong_hieu' || intent === 'tim_kiem_thuong_hieu_gia' || intent === 'tim_kiem_thuong_hieu_mau')) {
+            brand = extractBrandFromMessage(userMessage);
+        }
+
+        let reply = 'Xin lỗi, tôi chưa hiểu ý bạn. Bạn có thể nói rõ hơn không?';
+        let imageUrl = null;
+        let showButtons = false;
+        let products = null;
+
+        console.log('Intent:', intent);
+        console.log('Product Name:', productName);
+        console.log('Price Range:', priceRange);
+        console.log('Feature:', feature);
+        console.log('Color:', color);
+        console.log('Brand:', brand);
+
+        // ============= Xử lý Intent =============
+        if (intent === 'tim_kiem_theo_gia') {
+            const regexRange = /từ\s+(\d+)\s+đến\s+(\d+)\s+triệu/i;
+            const regexBelow = /dưới\s+(\d+)\s+triệu/i;
+            const regexAbove = /trên\s+(\d+)\s+triệu/i;
+            const regexHave = /có\s+(\d+)\s+triệu\s+mua\s+được/i;
+        
+            const matchRange = userMessage.match(regexRange);
+            const matchBelow = userMessage.match(regexBelow);
+            const matchAbove = userMessage.match(regexAbove);
+            const matchHave = userMessage.match(regexHave);
+        
+            let minPrice = 0;
+            let maxPrice = Infinity;
+        
+            // Ưu tiên sử dụng priceRange từ Wit.ai nếu có
+            if (priceRange) {
+                console.log('Price Range from Wit.ai:', priceRange);
+                const priceMatch = priceRange.match(/(\d+)/);
+                if (priceMatch) {
+                    maxPrice = parseInt(priceMatch[1]) * 1000000;
+                    console.log('Extracted maxPrice from priceRange:', maxPrice);
+                } else {
+                    console.log('Failed to extract price from priceRange');
+                    reply = "❌ Xin lỗi, tôi không thể hiểu rõ khoảng giá từ thông tin bạn cung cấp. Bạn có thể nói rõ hơn không? Ví dụ: 'Có điện thoại nào dưới 10 triệu không?'";
+                    res.json({ _text: reply });
+                    return;
+                }
+            } else if (matchRange) {
+                minPrice = parseInt(matchRange[1]) * 1000000;
+                maxPrice = parseInt(matchRange[2]) * 1000000;
+            } else if (matchBelow) {
+                maxPrice = parseInt(matchBelow[1]) * 1000000;
+            } else if (matchAbove) {
+                minPrice = parseInt(matchAbove[1]) * 1000000;
+                maxPrice = 999999999;
+            } else if (matchHave) {
+                console.log('Matched regexHave:', matchHave);
+                maxPrice = parseInt(matchHave[1]) * 1000000;
+            } else {
+                reply = "❌ Xin lỗi, tôi không thể hiểu rõ khoảng giá bạn muốn tìm. Bạn có thể nói rõ hơn về ngân sách của bạn không? Ví dụ: 'Có điện thoại nào dưới 10 triệu không?' hoặc 'Điện thoại từ 5 đến 10 triệu?'";
+                res.json({ _text: reply });
+                return;
+            }
+        
+            if (isNaN(minPrice) || isNaN(maxPrice) || minPrice > maxPrice) {
+                reply = "❌ Khoảng giá không hợp lệ. Vui lòng kiểm tra lại!";
+                res.json({ _text: reply });
+                return;
+            }
+        
+            try {
+                let products = await findProductsByPriceRange(minPrice, maxPrice, productName);
+                if (products && products.length > 0) {
+                    reply = `Chào bạn! Với ngân sách từ ${formatPrice(minPrice)} đến ${formatPrice(maxPrice)}, đây là một số lựa chọn phù hợp:\n`;
+                    reply += '<div class="product-grid">';
+                    products.forEach(product => {
+                        reply += `
+                            <div class="product-card">
+                                <img src="/images/${product.image_url}" class="product-image">
+                                <div class="product-info">
+                                    <h3>${product.name}</h3>
+                                    <p>${formatPrice(product.price)}</p>
+                                    <button class="buy-btn" data-product-name="${product.name}">Chọn mẫu này</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    reply += '</div>';
+                    console.log(`🤖 Bot: ${reply}`);
+                    res.json({ _text: reply, imageUrl: null, showButtons: false, products });
+                    return;
+                } else {
+                    reply = `Chào bạn! Tiếc là hiện tại bên mình không có sản phẩm nào trong khoảng giá từ ${formatPrice(minPrice)} đến ${formatPrice(maxPrice)}. Bạn có muốn xem những dòng sản phẩm khác không ạ?`;
+                    res.json({ _text: reply });
+                    return;
+                }
+            } catch (error) {
+                console.error("Lỗi khi tìm kiếm sản phẩm: ", error);
+                reply = "❌ Đã có lỗi xảy ra trong quá trình tìm kiếm sản phẩm.";
+                res.json({ _text: reply });
+                return;
+            }
+        
+        } else if (intent === 'thong_tin_san_pham') {
+            // Xử lý câu hỏi thông tin sản phẩm
+            let targetProductName = productName || context.lastProduct?.name;
+
+            if (!targetProductName) {
+                reply = 'Bạn muốn biết thông tin về sản phẩm nào? Ví dụ: "Thông tin iPhone 14"';
+                res.json({ _text: reply, imageUrl: null, showButtons: false });
+                return;
+            }
+
+            const product = await getProductInfo(targetProductName);
+
+            if (product) {
+                reply = `📌 **${product.name} (${product.brand})**:\n` +
+                        `${product.description}\n` +
+                        `💰 **Giá**: ${formatPrice(product.price)}\n` +
+                        `🎨 **Màu sắc**: ${product.colors || 'Không có thông tin'}\n` +
+                        `💾 **Lưu trữ**: ${product.storage || 'Không có thông tin'}\n` +
+                        `🗓️ **Ra mắt**: ${product.release_date || 'Không có thông tin'}\n` +
+                        `🛡️ **Bảo hành**: ${product.warranty_period ? `${product.warranty_period} tháng` : 'Không có thông tin'}\n` +
+                        (product.promotion_names ? `🎁 **Khuyến mãi**: ${product.promotion_names}\n` : '') +
+                        (product.features ? `🌟 **Tính năng nổi bật**: ${product.features}` : '') +
+                        `\nBạn có muốn đặt mua sản phẩm này không?`;
+                imageUrl = `/images/${product.image_url}`;
+                showButtons = true;
+                context.lastProduct = product;
+                context.lastBrand = product.brand;
+                res.json({ _text: reply, imageUrl, showButtons });
+                return;
+            } else {
+                const similarProducts = await suggestSimilarProducts(brand || context.lastBrand || 'Apple', targetProductName);
+
+                if (similarProducts.length > 0) {
+                    reply = `❌ Không tìm thấy sản phẩm "${targetProductName}". Tuy nhiên, đây là một số sản phẩm tương tự:\n`;
+                    reply += '<div class="product-grid">';
+                    similarProducts.forEach(product => {
+                        reply += `
+                            <div class="product-card">
+                                <img src="/images/${product.image_url}" class="product-image">
+                                <div class="product-info">
+                                    <h3>${product.name}</h3>
+                                    <p>${formatPrice(product.price)}</p>
+                                    <button class="buy-btn">Mua ngay</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    reply += '</div>';
+                } else {
+                    reply = `❌ Không tìm thấy sản phẩm "${targetProductName}". Bạn có muốn tìm sản phẩm khác không?`;
+                }
+                res.json({ _text: reply, imageUrl: null, showButtons: false });
+                return;
+            }
+        } else if (intent === 'tu_van_san_pham') {
+            let targetProductName = productName || context.lastProduct?.name;
+            if (targetProductName) {
+                const product = await getProductInfo(targetProductName);
+                if (product) {
+                    if (!context.consultation.purpose) {
+                        reply = `Chào bạn! Mình rất vui được tư vấn cho bạn về ${product.name} (${product.brand}). Để mình giúp bạn tìm ra lựa chọn phù hợp nhất, mình cần hỏi thêm một vài thông tin nhé!\n\n` +
+                                "1. Bạn thường sử dụng điện thoại cho những mục đích chính nào ạ? (Ví dụ: Chụp ảnh, chơi game, xem phim, làm việc,...)\n" +
+                                "Hãy trả lời để mình tiếp tục tư vấn nhé!";
+                        context.consultation = { purpose: null, budget: null, feature: null, color: null };
+                        imageUrl = `/images/${product.image_url}`;
+                        res.json({ _text: reply, imageUrl: imageUrl || null, showButtons: false });
+                        return;
+                    } else if (!context.consultation.budget) {
+                        context.consultation.purpose = userMessage;
+                        reply = "Cảm ơn bạn đã chia sẻ! Bạn có ngân sách khoảng bao nhiêu cho chiếc điện thoại này ạ? (Ví dụ: 10 triệu, 20 triệu,...)\n";
+                        imageUrl = `/images/${product.image_url}`;
+                        res.json({ _text: reply, imageUrl: imageUrl || null, showButtons: false });
+                        return;
+                    } else if (!context.consultation.feature) {
+                        context.consultation.budget = userMessage;
+                        reply = "Cảm ơn bạn! Bạn đặc biệt quan tâm đến yếu tố nào nhất? (Ví dụ: Camera, hiệu năng, thời lượng pin,...)\n";
+                        imageUrl = `/images/${product.image_url}`;
+                        res.json({ _text: reply, imageUrl: imageUrl || null, showButtons: false });
+                        return;
+                    } else if (!context.consultation.color) {
+                        context.consultation.feature = userMessage;
+                        reply = "Cảm ơn bạn! Bạn thích màu sắc nào ạ? (Ví dụ: Đen, trắng, xanh,...)\n";
+                        imageUrl = `/images/${product.image_url}`;
+                        res.json({ _text: reply, imageUrl: imageUrl || null, showButtons: false });
+                        return;
+                    } else {
+                        context.consultation.color = userMessage;
+                        reply = `Dựa trên thông tin bạn cung cấp:\n` +
+                                `- Mục đích sử dụng: ${context.consultation.purpose}\n` +
+                                `- Ngân sách: ${context.consultation.budget}\n` +
+                                `- Yếu tố quan tâm: ${context.consultation.feature}\n` +
+                                `- Màu sắc: ${context.consultation.color}\n` +
+                                `Mình thấy **${product.name}** rất phù hợp với bạn. Bạn có muốn xem chi tiết sản phẩm này không?`;
+                        context.consultation = { purpose: null, budget: null, feature: null, color: null };
+                        context.lastProduct = product;
+                        context.lastBrand = product.brand;
+                        imageUrl = `/images/${product.image_url}`;
+                        showButtons = true;
+                        res.json({ _text: reply, imageUrl: imageUrl || null, showButtons });
+                        return;
+                    }
+                } else {
+                    reply = `❌ Rất tiếc, mình không tìm thấy thông tin về sản phẩm "${targetProductName}" trong cơ sở dữ liệu. Bạn có muốn tư vấn về sản phẩm khác không?`;
+                    res.json({ _text: reply });
+                    return;
+                }
+            } else {
+                reply = 'Bạn muốn tư vấn về sản phẩm nào? Ví dụ: "Tư vấn iPhone 14"';
+                res.json({ _text: reply });
+                return;
+            }
+        } else if (intent === 'hoi_khuyen_mai') {
+            let targetProductName = productName || context.lastProduct?.name;
+            if (targetProductName) {
+                const product = await getProductInfo(targetProductName);
+                if (product) {
+                    reply = product.promotion_names
+                        ? `🎁 Sản phẩm **${product.name}** hiện có khuyến mãi: ${product.promotion_names}. \n` +
+                          `Bạn có muốn đặt mua sản phẩm này không?`
+                        : `❌ Hiện tại **${product.name}** không có khuyến mãi nào. \n` +
+                          `Bạn có muốn xem các sản phẩm khác đang có khuyến mãi không?`;
+                    imageUrl = `/images/${product.image_url}`;
+                    showButtons = true;
+                    context.lastProduct = product;
+                    context.lastBrand = product.brand;
+                } else {
+                    reply = `❌ Không tìm thấy sản phẩm "${targetProductName}". Bạn có muốn hỏi khuyến mãi của sản phẩm khác không?`;
+                    context.lastProduct = null;
+                }
+            } else {
+                reply = 'Bạn muốn hỏi khuyến mãi của sản phẩm nào? Ví dụ: "iPhone 14 có khuyến mãi gì không?"';
+            }
+        } else if (intent === 'hoi_bao_hanh') {
+            let targetProductName = productName || context.lastProduct?.name;
+            if (targetProductName) {
+                const product = await getProductInfo(targetProductName);
+                if (product) {
+                    reply = `🛡️ Sản phẩm **${product.name}** có thời gian bảo hành: ${product.warranty_period ? `${product.warranty_period} tháng` : 'Không có thông tin'}. \n` +
+                            `Bạn có muốn biết thêm thông tin khác về sản phẩm này không?`;
+                    imageUrl = `/images/${product.image_url}`;
+                    showButtons = true;
+                    context.lastProduct = product;
+                    context.lastBrand = product.brand;
+                } else {
+                    reply = `❌ Không tìm thấy sản phẩm "${targetProductName}". Bạn có muốn hỏi bảo hành của sản phẩm khác không?`;
+                    context.lastProduct = null;
+                }
+            } else {
+                reply = 'Bạn muốn hỏi bảo hành của sản phẩm nào? Ví dụ: "Bảo hành của Galaxy S23 bao lâu?"';
+            }
+        } else if (intent === 'tim_kiem_theo_thuong_hieu') {
+            let targetBrand = brand || context.lastBrand || extractBrandFromMessage(userMessage);
+
+            if (targetBrand) {
+                const products = await findProductsByBrand(targetBrand);
+        
+                if (products.length > 0) {
+                    reply = `📋 Dưới đây là một số sản phẩm của ${targetBrand} bên mình hiện đang có:\n`;
+                    reply += '<div class="product-grid">';
+                    products.forEach(product => {
+                        reply += `
+                            <div class="product-card">
+                                <img src="/images/${product.image_url}" class="product-image">
+                                <div class="product-info">
+                                    <h3>${product.name}</h3>
+                                    <p>${formatPrice(product.price)}</p>
+                                    <button class="buy-btn">Chọn mẫu này</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    reply += '</div>';
+                    reply += `\nAnh/chị có ấn tượng với mẫu nào không ạ?`;
+        
+                    context.lastBrand = targetBrand;
+                    context.lastProduct = null;
+                    context.awaitingProductChoice = true; // thêm cờ này để đợi user phản hồi lựa chọn
+        
+                    res.json({ _text: reply, imageUrl: null, showButtons: false, products });
+                    return;
+                } else {
+                    reply = `❌ Hiện tại cửa hàng chưa có sản phẩm nào thuộc thương hiệu ${targetBrand}.`;
+                    context.lastBrand = null;
+                }
+            } else {
+                reply = 'Bạn muốn tìm sản phẩm của thương hiệu nào? Ví dụ: "Có sản phẩm nào của iPhone không?"';
+            }
+        
+        } else if (intent === 'hoi_gia') {
+            let targetProductName = productName || context.lastProduct?.name;
+            if (targetProductName) {
+                const product = await getProductInfo(targetProductName);
+                if (product) {
+                    reply = `💰 Giá của **${product.name}** là: ${formatPrice(product.price)}. \n` +
+                            `Bạn có muốn biết thêm thông tin khác về sản phẩm này không?`;
+                    imageUrl = `/images/${product.image_url}`;
+                    showButtons = true;
+                    context.lastProduct = product;
+                    context.lastBrand = product.brand;
+                } else {
+                    reply = `❌ Không tìm thấy sản phẩm "${targetProductName}". Bạn có muốn hỏi giá sản phẩm khác không?`;
+                    context.lastProduct = null;
+                }
+            } else {
+                reply = 'Bạn muốn hỏi giá của sản phẩm nào? Ví dụ: "iPhone 14 giá bao nhiêu?"';
+            }
+        } else if (intent === 'hoi_mau_sac') {
+            let targetProductName = productName || context.lastProduct?.name;
+            if (targetProductName) {
+                const product = await getProductInfo(targetProductName);
+                if (product) {
+                    reply = `🎨 Sản phẩm **${product.name}** có các màu: ${product.colors || 'Không có thông tin'}. \n` +
+                            `Bạn có muốn biết thêm thông tin khác về sản phẩm này không?`;
+                    imageUrl = `/images/${product.image_url}`;
+                    showButtons = true;
+                    context.lastProduct = product;
+                    context.lastBrand = product.brand;
+                } else {
+                    reply = `❌ Không tìm thấy sản phẩm "${targetProductName}". Bạn có muốn hỏi màu sắc của sản phẩm khác không?`;
+                    context.lastProduct = null;
+                }
+            } else {
+                reply = 'Bạn muốn hỏi màu sắc của sản phẩm nào? Ví dụ: "iPhone 14 có màu gì?"';
+            }
+        } else if (intent === 'hoi_tra_gop') {
+            let targetProductName = productName || context.lastProduct?.name;
+            if (targetProductName) {
+                const product = await getProductInfo(targetProductName);
+                if (product) {
+                    reply = `📅 Sản phẩm **${product.name}** hỗ trợ trả góp 0% lãi suất trong 6 tháng. \n` +
+                            `Bạn có muốn biết thêm thông tin về trả góp hoặc đặt mua sản phẩm này không?`;
+                    imageUrl = `/images/${product.image_url}`;
+                    showButtons = true;
+                    context.lastProduct = product;
+                    context.lastBrand = product.brand;
+                } else {
+                    reply = `❌ Không tìm thấy sản phẩm "${targetProductName}". Bạn có muốn hỏi trả góp của sản phẩm khác không?`;
+                    context.lastProduct = null;
+                }
+            } else {
+                reply = 'Bạn muốn hỏi trả góp của sản phẩm nào? Ví dụ: "iPhone 14 có trả góp không?"';
+            }
+        } else if (intent === 'so_sanh_san_pham') {
+            const productName1 = witResponse.entities?.['product_name:product_name']?.[0]?.value || null;
+            const productName2 = witResponse.entities?.['product_name:product_name']?.[1]?.value || null;
+
+            if (productName1 && productName2) {
+                const comparison = await compareProducts(productName1, productName2);
+                if (comparison) {
+                    const { product1, product2 } = comparison;
+                    reply = `📊 So sánh **${product1.name}** và **${product2.name}**:\n` +
+                            `- **Giá**: ${formatPrice(product1.price)} vs ${formatPrice(product2.price)}\n` +
+                            `- **Màu sắc**: ${product1.colors || 'Không có thông tin'} vs ${product2.colors || 'Không có thông tin'}\n` +
+                            `- **Lưu trữ**: ${product1.storage || 'Không có thông tin'} vs ${product2.storage || 'Không có thông tin'}\n` +
+                            `- **Tính năng**: ${product1.features || 'Không có thông tin'} vs ${product2.features || 'Không có thông tin'}\n` +
+                            `Bạn có muốn xem chi tiết sản phẩm nào không?`;
+                    context.lastProduct = null;
+                    context.lastBrand = null;
+                } else {
+                    reply = `❌ Không thể so sánh vì không tìm thấy một trong hai sản phẩm "${productName1}" hoặc "${productName2}".`;
+                }
+            } else {
+                reply = 'Bạn muốn so sánh sản phẩm nào? Ví dụ: "So sánh iPhone 14 và Galaxy S23"';
+            }
+        } else if (intent === 'tim_kiem_thuong_hieu_gia') {
+            let targetBrand = brand || context.lastBrand;
+            if (targetBrand) {
+                const regexRange = /từ\s+(\d+)\s+đến\s+(\d+)\s+triệu/i;
+                const regexBelow = /dưới\s+(\d+)\s+triệu/i;
+                const regexAbove = /trên\s+(\d+)\s+triệu/i;
+
+                const matchRange = userMessage.match(regexRange);
+                const matchBelow = userMessage.match(regexBelow);
+                const matchAbove = userMessage.match(regexAbove);
+
+                let minPrice = 0;
+                let maxPrice = Infinity;
+
+                if (matchRange) {
+                    minPrice = parseInt(matchRange[1]) * 1000000;
+                    maxPrice = parseInt(matchRange[2]) * 1000000;
+                } else if (matchBelow) {
+                    maxPrice = parseInt(matchBelow[1]) * 1000000;
+                } else if (matchAbove) {
+                    minPrice = parseInt(matchAbove[1]) * 1000000;
+                    maxPrice = 999999999;
+                } else {
+                    reply = "❌ Xin lỗi, tôi không thể hiểu rõ khoảng giá bạn muốn tìm. Bạn có thể hỏi như: 'Có sản phẩm Samsung nào dưới 10 triệu không?'";
+                    res.json({ _text: reply });
+                    return;
+                }
+
+                if (isNaN(minPrice) || isNaN(maxPrice) || minPrice > maxPrice) {
+                    reply = "❌ Khoảng giá không hợp lệ. Vui lòng kiểm tra lại!";
+                    res.json({ _text: reply });
+                    return;
+                }
+
+                const products = await findProductsByPriceRange(minPrice, maxPrice, targetBrand);
+                if (products.length > 0) {
+                    reply = `📋 **Các sản phẩm của ${targetBrand} trong khoảng giá từ ${formatPrice(minPrice)} đến ${formatPrice(maxPrice)}**:\n`;
+                    reply += '<div class="product-grid">';
+                    products.forEach(product => {
+                        reply += `
+                            <div class="product-card">
+                                <img src="/images/${product.image_url}" class="product-image">
+                                <div class="product-info">
+                                    <h3>${product.name}</h3>
+                                    <p>${formatPrice(product.price)}</p>
+                                    <button class="buy-btn">Mua ngay</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    reply += '</div>';
+                    reply += `\nBạn có muốn xem chi tiết sản phẩm nào không?`;
+                    context.lastBrand = targetBrand;
+                    context.lastProduct = null;
+                    res.json({ _text: reply, imageUrl: null, showButtons: false, products });
+                    return;
+                } else {
+                    reply = `❌ Hiện tại cửa hàng chưa có sản phẩm nào của ${targetBrand} trong khoảng giá từ ${formatPrice(minPrice)} đến ${formatPrice(maxPrice)}. \n` +
+                            `Bạn có muốn xem các thương hiệu khác không?`;
+                    context.lastBrand = null;
+                    res.json({ _text: reply, imageUrl: null, showButtons: false });
+                    return;
+                }
+            } else {
+                reply = 'Bạn muốn tìm sản phẩm của thương hiệu nào? Ví dụ: "Có sản phẩm Samsung nào dưới 10 triệu không?"';
+                res.json({ _text: reply, imageUrl: null, showButtons: false });
+                return;
+            }
+        } else if (intent === 'tim_kiem_thuong_hieu_mau') {
+            let targetBrand = brand || context.lastBrand;
+            if (targetBrand && color) {
+                const products = await findProductsByBrand(targetBrand, null, color);
+                if (products.length > 0) {
+                    reply = `📋 **Các sản phẩm của ${targetBrand} màu ${color}**:\n`;
+                    reply += '<div class="product-grid">';
+                    products.forEach(product => {
+                        reply += `
+                            <div class="product-card">
+                                <img src="/images/${product.image_url}" class="product-image">
+                                <div class="product-info">
+                                    <h3>${product.name}</h3>
+                                    <p>${formatPrice(product.price)}</p>
+                                    <button class="buy-btn">Mua ngay</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    reply += '</div>';
+                    reply += `\nBạn có muốn xem chi tiết sản phẩm nào không?`;
+                    context.lastBrand = targetBrand;
+                    context.lastProduct = null;
+                    res.json({ _text: reply, imageUrl: null, showButtons: false, products });
+                    return;
+                } else {
+                    reply = `❌ Hiện tại cửa hàng chưa có sản phẩm nào của ${targetBrand} màu ${color}. \n` +
+                            `Bạn có muốn xem các màu khác không?`;
+                    context.lastBrand = null;
+                    res.json({ _text: reply, imageUrl: null, showButtons: false });
+                    return;
+                }
+            } else {
+                reply = 'Bạn muốn tìm sản phẩm của thương hiệu nào và màu gì? Ví dụ: "Có sản phẩm Samsung màu đen không?"';
+                res.json({ _text: reply, imageUrl: null, showButtons: false });
+                return;
+            }
+        }  else if (intent === 'hoi_mau_san_pham') {
+            let targetBrand = brand || extractBrandFromMessage(userMessage);
+        
+            // Chuẩn hóa tên thương hiệu nếu người dùng nói "iPhone"
+            if (targetBrand && targetBrand.toLowerCase() === 'iphone') {
+                targetBrand = 'Apple';
+            }
+        
+            if (targetBrand) {
+                const products = await findProductsByBrand(targetBrand);
+        
+                if (products.length > 0) {
+                    reply = `📦 Dạ có ạ! Hiện bên mình đang bán các mẫu **${targetBrand}** sau:\n`;
+                    reply += '<div class="product-grid">';
+                    products.forEach(product => {
+                        reply += `
+                            <div class="product-card">
+                                <img src="/images/${product.image_url}" class="product-image">
+                                <div class="product-info">
+                                    <h3>${product.name}</h3>
+                                    <p>${formatPrice(product.price)}</p>
+                                    <button class="buy-btn" data-product-name="${product.name}">Chọn mẫu này</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    reply += '</div>';
+                    reply += `\n👉 Anh/chị có ấn tượng với mẫu nào không ạ?`;
+        
+                    context.lastBrand = targetBrand;
+                    context.lastProduct = null;
+                    context.awaitingProductChoice = true;
+        
+                    return res.json({ _text: reply, imageUrl: null, showButtons: false });
+                } else {
+                    reply = `❌ Dạ hiện tại bên mình chưa có mẫu điện thoại nào của **${targetBrand}**.\n👉 Anh/chị muốn xem sản phẩm của thương hiệu khác không ạ?`;
+                    context.lastBrand = null;
+                    return res.json({ _text: reply });
+                }
+            } else {
+                reply = 'Bạn đang muốn tìm điện thoại của thương hiệu nào ạ? Ví dụ: "Shop có bán iPhone không?"';
+                return res.json({ _text: reply });
+            }
+                  
+        } else if (intent === 'hoi_nguyen_mai') {
+            reply = 'Hiện tại, tất cả sản phẩm tại cửa hàng đều là hàng nguyên seal, mới 100%. Bạn có muốn xem thông tin chi tiết của sản phẩm nào không?';
+        } else if (intent === 'hoi_tinh_trang_hang') {
+            reply = 'Tất cả sản phẩm tại cửa hàng đều là hàng chính hãng, mới 100% và còn nguyên bảo hành. Bạn có muốn xem thông tin chi tiết của sản phẩm nào không?';
+        } else {
+            // Nếu không nhận diện được intent, sử dụng DeepSeek AI để trả lời dựa trên ngữ cảnh
+            const contextPrompt = {
+                lastProduct: context.lastProduct?.name || 'không có sản phẩm',
+                lastBrand: context.lastBrand || 'không có thương hiệu',
+                lastIntent: context.lastIntent || 'không có intent',
+                history: context.history.slice(-3),
+                consultation: context.consultation
+            };
+            reply = await getDeepSeekResponse(userMessage, contextPrompt);
+            context.lastProduct = null;
+            context.lastBrand = null;
+        }
+
+        // Lưu vào lịch sử hội thoại
+        context.lastIntent = intent;
+        context.history.push({ intent, productName, brand, userMessage, reply });
+        if (context.history.length > 10) context.history.shift();
+
+        console.log(`🤖 Bot: ${reply}`);
+        
+        res.json({ _text: reply, imageUrl, showButtons, products });
+    } catch (error) {
+        console.error("❌ Lỗi tổng quát trong chatbot:", error);
+        res.status(500).json({ _text: "❌ Xin lỗi, đã có lỗi xảy ra. Vui lòng thử lại sau!", imageUrl: null, showButtons: false });
+    }
+});
+
+// Chạy server
+app.listen(PORT, () => {
+    console.log(`🚀 Server đang chạy tại: http://localhost:${PORT}`);
+});

@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cửa hàng Điện thoại</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <!-- Navbar -->
+    <nav class="navbar">
+        <div class="nav-top">
+            <div class="nav-logo">
+                <a href="/"><img src="/images/lg.png" alt="Logo"></a>
+            </div>
+            <div class="nav-search">
+                <input type="text" id="searchInput" placeholder="Tìm kiếm sản phẩm...">
+                <button onclick="searchProducts()"><i class="fas fa-search"></i></button>
+            </div>
+            <div class="nav-icons">
+                <a href="#"><i class="fas fa-map-marker-alt"></i> Hồ Chí Minh</a>
+                <a href="#"><i class="fas fa-shopping-cart"></i> Giỏ hàng</a>
+                <a href="#"><i class="fas fa-user"></i> Đăng nhập</a>
+            </div>
+        </div>
+        <div class="nav-categories">
+            <a href="#" data-brand="Apple">iPhone</a>
+            <a href="#" data-brand="Samsung">Samsung</a>
+            <a href="#" data-brand="Xiaomi">Xiaomi</a>
+            <a href="#" data-brand="Oppo">Oppo</a>
+            <a href="#" data-brand="Vivo">Vivo</a>
+        </div>
+    </nav>
+
+    <!-- Banner -->
+    <section class="banner">
+        <div class="banner-content">
+            <h1>Khám phá iPhone 16 Series</h1>
+            <p>Giảm ngay 10% khi đặt trước!</p>
+            <button class="banner-btn">Mua ngay</button>
+        </div>
+    </section>
+
+    <!-- Filters -->
+    <section class="filters">
+        <div class="filter-container">
+            <h3>Lọc sản phẩm</h3>
+            <div class="filter-group">
+                <label for="minPrice">Giá tối thiểu:</label>
+                <input type="number" id="minPrice" placeholder="0">
+            </div>
+            <div class="filter-group">
+                <label for="maxPrice">Giá tối đa:</label>
+                <input type="number" id="maxPrice" placeholder="∞">
+            </div>
+            <button onclick="loadProducts()">Áp dụng</button>
+        </div>
+    </section>
+
+    <!-- Product List -->
+    <section class="product-list">
+        <h2>Danh sách sản phẩm</h2>
+        <div class="product-grid" id="productGrid">
+            <!-- Sản phẩm sẽ được thêm vào đây bằng JavaScript -->
+        </div>
+        <div class="pagination">
+            <button id="prevPage" onclick="changePage(-1)">Trước</button>
+            <span id="pageInfo"></span>
+            <button id="nextPage" onclick="changePage(1)">Sau</button>
+        </div>
+    </section>
+
+    <!-- Chatbot Toggle Button -->
+    <div class="chatbot-toggle" onclick="toggleChatbot()">
+        <i class="fas fa-comment-alt"></i>
+    </div>
+
+    <!-- Chatbot Container -->
+    <div class="chatbot-container" id="chatbotContainer">
+        <div class="chatbot-header">
+            <h2>Chatbot Hỗ trợ</h2>
+            <button class="chatbot-close" onclick="toggleChatbot()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="chatbot-messages" id="chatbotMessages">
+            <!-- Tin nhắn sẽ được thêm vào đây -->
+        </div>
+        <div class="chatbot-input">
+            <input type="text" id="userInput" placeholder="Nhập câu hỏi của bạn...">
+            <button onclick="sendMessage()"><i class="fas fa-paper-plane"></i></button>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-content">
+            <div class="footer-section">
+                <h3>Liên hệ</h3>
+                <p>Email: support@phoneshop.com</p>
+                <p>Hotline: 0123 456 789</p>
+                <p>Địa chỉ: 123 Đường Điện thoại, TP. Hồ Chí Minh</p>
+            </div>
+            <div class="footer-section">
+                <h3>Chính sách</h3>
+                <p><a href="#">Chính sách bảo hành</a></p>
+                <p><a href="#">Chính sách đổi trả</a></p>
+                <p><a href="#">Chính sách giao hàng</a></p>
+            </div>
+            <div class="footer-section">
+                <h3>Theo dõi chúng tôi</h3>
+                <p><a href="#"><i class="fab fa-facebook"></i> Facebook</a></p>
+                <p><a href="#"><i class="fab fa-instagram"></i> Instagram</a></p>
+                <p><a href="#"><i class="fab fa-youtube"></i> YouTube</a></p>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <p>© 2025 Cửa hàng Điện thoại. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <script src="/script.js"></script>
+</body>
+</html>
